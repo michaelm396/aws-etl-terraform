@@ -2,7 +2,8 @@ from __future__ import annotations
 """Load Lambda for the ETL pipeline.
 
 This stage reads the processed CSV from S3, maintains the gender lookup table,
-and upserts the transformed records into PostgreSQL RDS.
+and upserts the transformed records into PostgreSQL RDS, including the IP
+geolocation enrichment columns added during the transform stage.
 """
 
 import csv
@@ -59,7 +60,13 @@ def ensure_schema(connection: pg8000.dbapi.Connection) -> None:
             last_name TEXT,
             email TEXT,
             gender_code SMALLINT REFERENCES gender_mapping(gender_code),
-            ip_address TEXT
+            ip_address TEXT,
+            country TEXT,
+            region TEXT,
+            city TEXT,
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            timezone TEXT
         )
         """
     )
@@ -67,6 +74,42 @@ def ensure_schema(connection: pg8000.dbapi.Connection) -> None:
         """
         ALTER TABLE person_records
         ADD COLUMN IF NOT EXISTS gender_code SMALLINT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS country TEXT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS region TEXT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS city TEXT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS timezone TEXT
         """
     )
     cursor.execute(
@@ -119,15 +162,27 @@ def load_rows(
                 last_name,
                 email,
                 gender_code,
-                ip_address
+                ip_address,
+                country,
+                region,
+                city,
+                latitude,
+                longitude,
+                timezone
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 first_name = EXCLUDED.first_name,
                 last_name = EXCLUDED.last_name,
                 email = EXCLUDED.email,
                 gender_code = EXCLUDED.gender_code,
-                ip_address = EXCLUDED.ip_address
+                ip_address = EXCLUDED.ip_address,
+                country = EXCLUDED.country,
+                region = EXCLUDED.region,
+                city = EXCLUDED.city,
+                latitude = EXCLUDED.latitude,
+                longitude = EXCLUDED.longitude,
+                timezone = EXCLUDED.timezone
             """,
             (
                 int(row["id"]) if row["id"] else None,
@@ -136,6 +191,12 @@ def load_rows(
                 row["email"] or None,
                 int(row["gender_code"]) if row["gender_code"] else None,
                 row["ip_address"] or None,
+                row["country"] or None,
+                row["region"] or None,
+                row["city"] or None,
+                float(row["latitude"]) if row["latitude"] else None,
+                float(row["longitude"]) if row["longitude"] else None,
+                row["timezone"] or None,
             ),
         )
         row_count += 1

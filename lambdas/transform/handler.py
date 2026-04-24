@@ -2,17 +2,20 @@ from __future__ import annotations
 """Transform Lambda for the ETL pipeline.
 
 This stage reads the raw workbook from S3, normalizes fields, converts the
-categorical gender column to a gender_code integer, and writes a processed CSV
-back to S3.
+categorical gender column to a gender_code integer, enriches public IP
+addresses with offline geolocation metadata, and writes a processed CSV back
+to S3.
 """
 
 import csv
+import ipaddress
 import os
 from io import BytesIO, StringIO
 from pathlib import PurePosixPath
 from urllib.parse import unquote_plus
 
 import boto3
+from geolite2 import geolite2
 from openpyxl import load_workbook
 
 
@@ -30,6 +33,15 @@ GENDER_MAP = {
 s3_client = boto3.client("s3")
 RAW_SAMPLE_ROWS = 3
 PROCESSED_SAMPLE_ROWS = 3
+GEOLOCATION_HEADERS = [
+    "country",
+    "region",
+    "city",
+    "latitude",
+    "longitude",
+    "timezone",
+]
+geoip_reader = geolite2.reader()
 
 
 def normalize_value(value: object) -> object:
@@ -49,6 +61,79 @@ def transform_gender(value: object) -> object:
         raise ValueError(f"Unsupported gender value: {value}")
 
     return GENDER_MAP[value]
+
+
+def null_geolocation_fields() -> list[object]:
+    """Return an empty geolocation payload for failed lookups."""
+    return [None] * len(GEOLOCATION_HEADERS)
+
+
+def validate_public_ip(ip_value: object) -> object | None:
+    """Return a parsed public IP address or None for missing/private/local values."""
+    if ip_value is None:
+        return None
+
+    try:
+        parsed_ip = ipaddress.ip_address(str(ip_value))
+    except ValueError:
+        print(f"Geolocation skipped for invalid IP address: {ip_value}")
+        return None
+
+    if (
+        parsed_ip.is_private
+        or parsed_ip.is_loopback
+        or parsed_ip.is_multicast
+        or parsed_ip.is_reserved
+        or parsed_ip.is_link_local
+        or parsed_ip.is_unspecified
+    ):
+        print(f"Geolocation skipped for non-public IP address: {ip_value}")
+        return None
+
+    return parsed_ip
+
+
+def safe_nested_get(value: dict | list | None, *keys: object) -> object | None:
+    """Safely walk nested dict/list values from the GeoLite2 lookup payload."""
+    current: object | None = value
+    for key in keys:
+        if current is None:
+            return None
+        if isinstance(current, dict):
+            current = current.get(key)
+        elif isinstance(current, list) and isinstance(key, int):
+            if key >= len(current):
+                return None
+            current = current[key]
+        else:
+            return None
+    return current
+
+
+def geolocate_ip_address(ip_value: object) -> list[object]:
+    """Return geolocation fields for a public IP, or nulls when lookup fails."""
+    parsed_ip = validate_public_ip(ip_value)
+    if parsed_ip is None:
+        return null_geolocation_fields()
+
+    try:
+        geo_record = geoip_reader.get(str(parsed_ip))
+    except Exception as exc:
+        print(f"Geolocation lookup failed for IP {ip_value}: {exc}")
+        return null_geolocation_fields()
+
+    if not geo_record:
+        print(f"Geolocation lookup returned no data for IP {ip_value}")
+        return null_geolocation_fields()
+
+    return [
+        safe_nested_get(geo_record, "country", "names", "en"),
+        safe_nested_get(geo_record, "subdivisions", 0, "names", "en"),
+        safe_nested_get(geo_record, "city", "names", "en"),
+        safe_nested_get(geo_record, "location", "latitude"),
+        safe_nested_get(geo_record, "location", "longitude"),
+        safe_nested_get(geo_record, "location", "time_zone"),
+    ]
 
 
 def destination_key(source_key: str, processed_prefix: str) -> str:
@@ -80,20 +165,39 @@ def extract_workbook_rows_from_s3(bucket_name: str, source_key: str) -> list[tup
 
 def transform_workbook_rows_to_csv(
     rows: list[tuple[object, ...]],
-) -> tuple[str, list[str], list[list[object]], list[list[object]]]:
+) -> tuple[
+    str,
+    list[str],
+    list[str],
+    list[list[object]],
+    list[list[object]],
+]:
     """Transform raw workbook rows into a processed CSV payload."""
     if not rows:
         raise ValueError("Uploaded workbook is empty.")
 
-    headers = [str(value).strip() if value is not None else "" for value in rows[0]]
+    raw_headers = [str(value).strip() if value is not None else "" for value in rows[0]]
+    processed_headers = raw_headers.copy()
     try:
         gender_index = next(
-            index for index, header in enumerate(headers) if header.lower() == "gender"
+            index
+            for index, header in enumerate(processed_headers)
+            if header.lower() == "gender"
         )
     except StopIteration as exc:
         raise ValueError("Workbook does not contain a 'gender' column.") from exc
 
-    headers[gender_index] = "gender_code"
+    try:
+        ip_address_index = next(
+            index
+            for index, header in enumerate(processed_headers)
+            if header.lower() == "ip_address"
+        )
+    except StopIteration as exc:
+        raise ValueError("Workbook does not contain an 'ip_address' column.") from exc
+
+    processed_headers[gender_index] = "gender_code"
+    processed_headers.extend(GEOLOCATION_HEADERS)
 
     # Capture a tiny before/after sample for CloudWatch verification.
     raw_sample_rows = [
@@ -103,17 +207,24 @@ def transform_workbook_rows_to_csv(
 
     output_buffer = StringIO()
     writer = csv.writer(output_buffer)
-    writer.writerow(headers)
+    writer.writerow(processed_headers)
     processed_sample_rows: list[list[object]] = []
 
     for row in rows[1:]:
         mutable_row = [normalize_value(value) for value in row]
         mutable_row[gender_index] = transform_gender(mutable_row[gender_index])
+        mutable_row.extend(geolocate_ip_address(mutable_row[ip_address_index]))
         writer.writerow(mutable_row)
         if len(processed_sample_rows) < PROCESSED_SAMPLE_ROWS:
             processed_sample_rows.append(mutable_row.copy())
 
-    return output_buffer.getvalue(), headers, raw_sample_rows, processed_sample_rows
+    return (
+        output_buffer.getvalue(),
+        raw_headers,
+        processed_headers,
+        raw_sample_rows,
+        processed_sample_rows,
+    )
 
 
 def load_transformed_csv_to_s3(
@@ -150,12 +261,13 @@ def lambda_handler(event: dict, context: object) -> dict:
         rows = extract_workbook_rows_from_s3(bucket_name, source_key)
         (
             csv_payload,
-            headers,
+            raw_headers,
+            processed_headers,
             raw_sample_rows,
             processed_sample_rows,
         ) = transform_workbook_rows_to_csv(rows)
-        log_sample_rows("Raw workbook", headers, raw_sample_rows)
-        log_sample_rows("Processed CSV", headers, processed_sample_rows)
+        log_sample_rows("Raw workbook", raw_headers, raw_sample_rows)
+        log_sample_rows("Processed CSV", processed_headers, processed_sample_rows)
 
         transformed_key = destination_key(source_key, processed_prefix)
         load_transformed_csv_to_s3(bucket_name, transformed_key, csv_payload)

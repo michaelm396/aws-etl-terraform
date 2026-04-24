@@ -15,6 +15,7 @@ The pipeline performs:
    - Lambda trims whitespace from string fields
    - Lambda converts blank strings to null values
    - Lambda converts the `gender` column to `gender_code`
+   - Lambda enriches `ip_address` values with geolocation metadata
    - Lambda writes a transformed CSV to `processed/`
 
 3. **Load**
@@ -80,6 +81,7 @@ The project is organized so each ETL stage is easy to identify:
   - Key functions:
     - `extract_workbook_rows_from_s3(...)`
     - `transform_workbook_rows_to_csv(...)`
+    - `geolocate_ip_address(...)`
     - `load_transformed_csv_to_s3(...)`
 
 - **Load**
@@ -199,6 +201,7 @@ No manual RDS credentials are required from the reviewer. Database authenticatio
 These are installed during deployment into the Lambda package, not into your local system Python:
 
 - `openpyxl` for the transform Lambda
+- `maxminddb-geolite2` for offline IP geolocation in the transform Lambda
 - `pg8000` for the RDS loader Lambda
 
 ## How To Run
@@ -271,6 +274,21 @@ The transform Lambda applies these rules:
 2. Convert blank strings to null values
 3. Convert `gender` values to integer codes
 4. Rename the transformed categorical field to `gender_code`
+5. Enrich public IP addresses with:
+   - `country`
+   - `region`
+   - `city`
+   - `latitude`
+   - `longitude`
+   - `timezone`
+
+Invalid, missing, private, local, loopback, and otherwise unsupported IP
+addresses do not fail the transform. They are logged and written with null
+geolocation fields instead.
+
+The geolocation enrichment is performed with the offline `maxminddb-geolite2`
+dataset packaged into the transform Lambda, so the transform does not depend on
+an external paid API.
 
 Current gender mapping:
 
@@ -300,6 +318,7 @@ The loader Lambda creates and populates:
   - lookup table that stores the mapping between `gender_code` and `gender_label`
 - `person_records`
   - main table that stores each record and references `gender_mapping.gender_code`
+  - also stores geolocation fields derived from `ip_address`
 
 Example lookup table contents:
 
@@ -311,6 +330,21 @@ Example lookup table contents:
 - `5 -> Agender`
 - `6 -> Genderqueer`
 - `7 -> Polygender`
+
+Example transformed output columns:
+
+- `id`
+- `first_name`
+- `last_name`
+- `email`
+- `gender_code`
+- `ip_address`
+- `country`
+- `region`
+- `city`
+- `latitude`
+- `longitude`
+- `timezone`
 
 ## How To Verify Execution
 
