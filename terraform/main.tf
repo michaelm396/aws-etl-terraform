@@ -2,6 +2,7 @@ locals {
   bucket_name          = "${var.bucket_prefix}-${random_id.bucket_suffix.hex}"
   transform_lambda_zip = "${path.module}/../build/gender_transform_lambda.zip"
   loader_lambda_zip    = "${path.module}/../build/rds_loader_lambda.zip"
+  inference_lambda_zip = "${path.module}/../build/inference_lambda.zip"
 
   common_tags = merge(
     {
@@ -159,9 +160,11 @@ resource "aws_lambda_function" "gender_transform" {
   role          = aws_iam_role.gender_transform_lambda.arn
   handler       = "handler.lambda_handler"
   runtime       = "python3.11"
+  architectures = ["x86_64"]
   timeout       = 30
   memory_size   = 256
   filename      = local.transform_lambda_zip
+  layers        = [var.transform_pandas_layer_arn]
 
   source_code_hash = filebase64sha256(local.transform_lambda_zip)
 
@@ -229,6 +232,34 @@ resource "aws_iam_role_policy" "rds_loader_lambda" {
   policy = data.aws_iam_policy_document.rds_loader_access.json
 }
 
+resource "aws_iam_role" "inference_lambda" {
+  name               = "${var.project_name}-${var.environment}-inference-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "inference_lambda" {
+  name = "${var.project_name}-${var.environment}-inference-policy"
+  role = aws_iam_role.inference_lambda.id
+  policy = jsonencode(
+    {
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect = "Allow"
+          Action = [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+          ]
+          Resource = "arn:aws:logs:*:*:*"
+        },
+      ]
+    }
+  )
+}
+
 resource "aws_lambda_function" "rds_loader" {
   function_name = "${var.project_name}-${var.environment}-${var.loader_lambda_function_name}"
   role          = aws_iam_role.rds_loader_lambda.arn
@@ -256,6 +287,53 @@ resource "aws_lambda_function" "rds_loader" {
   }
 
   tags = local.common_tags
+}
+
+resource "aws_lambda_function" "inference" {
+  function_name = "${var.project_name}-${var.environment}-${var.inference_lambda_function_name}"
+  role          = aws_iam_role.inference_lambda.arn
+  handler       = "handler.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 30
+  memory_size   = 512
+  filename      = local.inference_lambda_zip
+
+  source_code_hash = filebase64sha256(local.inference_lambda_zip)
+
+  tags = local.common_tags
+}
+
+resource "aws_apigatewayv2_api" "inference" {
+  name          = "${var.project_name}-${var.environment}-institution-classifier-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "inference_lambda" {
+  api_id                 = aws_apigatewayv2_api.inference.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.inference.invoke_arn
+  integration_method     = "POST"
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "inference_predict_get" {
+  api_id    = aws_apigatewayv2_api.inference.id
+  route_key = "GET /predict"
+  target    = "integrations/${aws_apigatewayv2_integration.inference_lambda.id}"
+}
+
+resource "aws_apigatewayv2_stage" "inference_dev" {
+  api_id      = aws_apigatewayv2_api.inference.id
+  name        = var.environment
+  auto_deploy = true
+}
+
+resource "aws_lambda_permission" "allow_apigateway_invoke_inference" {
+  statement_id  = "AllowApiGatewayInvokeInference"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.inference.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.inference.execution_arn}/*/*"
 }
 
 resource "aws_lambda_permission" "allow_s3_invoke" {

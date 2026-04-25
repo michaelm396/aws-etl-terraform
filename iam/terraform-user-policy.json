@@ -55,6 +55,18 @@
       "Resource": "*"
     },
     {
+      "Sid": "ApiGatewayHttpApiManagement",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:DELETE",
+        "apigateway:GET",
+        "apigateway:PATCH",
+        "apigateway:POST",
+        "apigateway:PUT"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "IamForLambdaExecutionRoles",
       "Effect": "Allow",
       "Action": [

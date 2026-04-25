@@ -2,8 +2,9 @@ from __future__ import annotations
 """Load Lambda for the ETL pipeline.
 
 This stage reads the processed CSV from S3, maintains the gender lookup table,
-and upserts the transformed records into PostgreSQL RDS, including the IP
-geolocation enrichment columns added during the transform stage.
+and upserts the transformed records into PostgreSQL RDS, including the
+domain-based email features and IP geolocation enrichment columns added during
+the transform stage.
 """
 
 import csv
@@ -59,7 +60,11 @@ def ensure_schema(connection: pg8000.dbapi.Connection) -> None:
             first_name TEXT,
             last_name TEXT,
             email TEXT,
-            gender_code SMALLINT REFERENCES gender_mapping(gender_code),
+            email_domain TEXT,
+            domain_type TEXT,
+            affiliation_category TEXT,
+            gender TEXT,
+            gender_mapped SMALLINT REFERENCES gender_mapping(gender_code),
             ip_address TEXT,
             country TEXT,
             region TEXT,
@@ -73,7 +78,31 @@ def ensure_schema(connection: pg8000.dbapi.Connection) -> None:
     cursor.execute(
         """
         ALTER TABLE person_records
-        ADD COLUMN IF NOT EXISTS gender_code SMALLINT
+        ADD COLUMN IF NOT EXISTS email_domain TEXT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS domain_type TEXT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS affiliation_category TEXT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS gender TEXT
+        """
+    )
+    cursor.execute(
+        """
+        ALTER TABLE person_records
+        ADD COLUMN IF NOT EXISTS gender_mapped SMALLINT
         """
     )
     cursor.execute(
@@ -124,7 +153,7 @@ def ensure_schema(connection: pg8000.dbapi.Connection) -> None:
             ) THEN
                 EXECUTE '
                     UPDATE person_records
-                    SET gender_code = COALESCE(gender_code, gender)
+                    SET gender_mapped = COALESCE(gender_mapped, gender)
                 ';
             END IF;
         END $$;
@@ -161,7 +190,11 @@ def load_rows(
                 first_name,
                 last_name,
                 email,
-                gender_code,
+                email_domain,
+                domain_type,
+                affiliation_category,
+                gender,
+                gender_mapped,
                 ip_address,
                 country,
                 region,
@@ -170,12 +203,16 @@ def load_rows(
                 longitude,
                 timezone
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 first_name = EXCLUDED.first_name,
                 last_name = EXCLUDED.last_name,
                 email = EXCLUDED.email,
-                gender_code = EXCLUDED.gender_code,
+                email_domain = EXCLUDED.email_domain,
+                domain_type = EXCLUDED.domain_type,
+                affiliation_category = EXCLUDED.affiliation_category,
+                gender = EXCLUDED.gender,
+                gender_mapped = EXCLUDED.gender_mapped,
                 ip_address = EXCLUDED.ip_address,
                 country = EXCLUDED.country,
                 region = EXCLUDED.region,
@@ -189,7 +226,11 @@ def load_rows(
                 row["first_name"] or None,
                 row["last_name"] or None,
                 row["email"] or None,
-                int(row["gender_code"]) if row["gender_code"] else None,
+                row["email_domain"] or None,
+                row["domain_type"] or None,
+                row["affiliation_category"] or None,
+                row["gender"] or None,
+                int(row["gender_mapped"]) if row["gender_mapped"] else None,
                 row["ip_address"] or None,
                 row["country"] or None,
                 row["region"] or None,

@@ -9,7 +9,7 @@ output "bucket_arn" {
 }
 
 output "lambda_function_name" {
-  description = "Lambda function used for XLSX gender transformation."
+  description = "Lambda function used for the ETL data transformation stage."
   value       = aws_lambda_function.gender_transform.function_name
 }
 
@@ -26,6 +26,21 @@ output "raw_prefix" {
 output "loader_lambda_function_name" {
   description = "Lambda function used to load transformed CSV data into RDS."
   value       = aws_lambda_function.rds_loader.function_name
+}
+
+output "inference_lambda_function_name" {
+  description = "Lambda function used for Institution Type Classifier inference."
+  value       = aws_lambda_function.inference.function_name
+}
+
+output "inference_lambda_arn" {
+  description = "ARN of the Institution Type Classifier inference Lambda."
+  value       = aws_lambda_function.inference.arn
+}
+
+output "inference_api_url" {
+  description = "POST /predict endpoint for the Institution Type Classifier HTTP API."
+  value       = "${aws_apigatewayv2_stage.inference_dev.invoke_url}/predict"
 }
 
 output "db_endpoint" {

@@ -4,6 +4,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -16,6 +17,7 @@ PACKAGES = [
         "handler": "handler.py",
         "requirements": "requirements.txt",
         "zip_name": "gender_transform_lambda.zip",
+        "exclude_requirements": ["pandas"],
     },
     {
         "source_dir": LAMBDA_ROOT / "load",
@@ -78,20 +80,45 @@ def package_lambda(definition: dict[str, str]) -> None:
 
     package_dir.mkdir(parents=True, exist_ok=True)
 
+    requirements_source = requirements_file
+    excluded_packages = set(definition.get("exclude_requirements", []))
+    temp_requirements_file: Path | None = None
+
+    if excluded_packages:
+        filtered_lines = []
+        for raw_line in requirements_file.read_text().splitlines():
+            stripped = raw_line.strip()
+            package_name = stripped.split("==")[0].strip().lower() if stripped else ""
+            if package_name and package_name not in excluded_packages:
+                filtered_lines.append(raw_line)
+
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            delete=False,
+        )
+        temp_file.write("\n".join(filtered_lines) + "\n")
+        temp_file.close()
+        temp_requirements_file = Path(temp_file.name)
+        requirements_source = temp_requirements_file
+
     # Package dependencies into the deployment directory instead of the local
     # Python environment so the repo stays lightweight for handoff.
     run_command(
         [
-            "python3",
+            sys.executable,
             "-m",
             "pip",
             "install",
             "-r",
-            str(requirements_file),
+            str(requirements_source),
             "--target",
             str(package_dir),
         ]
     )
+
+    if temp_requirements_file is not None and temp_requirements_file.exists():
+        temp_requirements_file.unlink()
 
     shutil.copy2(handler_file, package_dir / "handler.py")
 
