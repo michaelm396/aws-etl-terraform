@@ -7,6 +7,7 @@ pipeline to continue the transform and load stages.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ TERRAFORM_DIR = PROJECT_ROOT / "terraform"
 DEFAULT_FILE = PROJECT_ROOT / "SRDataEngineerChallenge_DATASET.xlsx"
 DEFAULT_S3_KEY_PREFIX = "raw"
 DEFAULT_PROCESSED_PREFIX = "processed"
+DEFAULT_REGION = "us-west-2"
 XLSX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
@@ -58,7 +60,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("AWS_PROFILE"),
         help="Optional AWS profile name to use for AWS CLI calls.",
     )
+    parser.add_argument(
+        "--aws-region",
+        default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
+        help=(
+            "AWS region for S3 calls. Defaults to AWS_REGION/AWS_DEFAULT_REGION, "
+            "then terraform.tfvars aws_region, then us-west-2."
+        ),
+    )
     return parser
+
+
+def parse_tfvars_string(name: str, default: str) -> str:
+    """Read a simple quoted string value from terraform.tfvars."""
+    tfvars_path = TERRAFORM_DIR / "terraform.tfvars"
+    if not tfvars_path.exists():
+        return default
+
+    pattern = re.compile(rf'^\s*{re.escape(name)}\s*=\s*"([^"]+)"\s*$')
+    for line in tfvars_path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match:
+            return match.group(1)
+    return default
+
+
+def resolve_aws_region(explicit_region: str | None) -> str:
+    """Prefer explicit/env region, otherwise use Terraform's configured region."""
+    if explicit_region:
+        return explicit_region
+    return parse_tfvars_string("aws_region", DEFAULT_REGION)
 
 
 def terraform_output(name: str) -> str:
@@ -102,6 +133,7 @@ def extract_local_xlsx_to_s3(
     file_path: Path,
     key_prefix: str,
     profile_name: str | None,
+    region: str,
 ) -> str:
     """Upload the local XLSX file into the raw S3 landing zone."""
     if not file_path.exists():
@@ -118,6 +150,8 @@ def extract_local_xlsx_to_s3(
         destination,
         "--content-type",
         XLSX_CONTENT_TYPE,
+        "--region",
+        region,
     ]
     if profile_name:
         command.extend(["--profile", profile_name])
@@ -143,6 +177,7 @@ def verify_extracted_s3_object(
     bucket_name: str,
     s3_key: str,
     profile_name: str | None,
+    region: str,
 ) -> None:
     """Confirm the raw object exists before the AWS-side pipeline continues."""
     command = [
@@ -153,6 +188,8 @@ def verify_extracted_s3_object(
         bucket_name,
         "--key",
         s3_key,
+        "--region",
+        region,
     ]
     if profile_name:
         command.extend(["--profile", profile_name])
@@ -186,6 +223,7 @@ def run_extract_stage(
     file_path: Path,
     key_prefix: str,
     profile_name: str | None,
+    region: str,
 ) -> str:
     """Run the full extract stage: upload the workbook and verify it exists."""
     raw_s3_key = extract_local_xlsx_to_s3(
@@ -193,11 +231,13 @@ def run_extract_stage(
         file_path=file_path,
         key_prefix=key_prefix,
         profile_name=profile_name,
+        region=region,
     )
     verify_extracted_s3_object(
         bucket_name=bucket_name,
         s3_key=raw_s3_key,
         profile_name=profile_name,
+        region=region,
     )
     return raw_s3_key
 
@@ -210,6 +250,7 @@ def main() -> None:
     file_path = Path(args.file).expanduser().resolve()
 
     try:
+        region = resolve_aws_region(args.aws_region)
         bucket_name = resolve_bucket_name(args.bucket)
         bucket_arn = resolve_bucket_arn()
         raw_s3_key = run_extract_stage(
@@ -217,6 +258,7 @@ def main() -> None:
             file_path=file_path,
             key_prefix=args.key_prefix,
             profile_name=args.aws_profile,
+            region=region,
         )
         transformed_s3_key = processed_key(raw_s3_key, args.processed_prefix)
     except (FileNotFoundError, RuntimeError) as exc:
@@ -226,6 +268,7 @@ def main() -> None:
     print("Upload completed successfully.")
     print(f"Bucket: {bucket_name}")
     print(f"Bucket ARN: {bucket_arn}")
+    print(f"AWS Region: {region}")
     print(f"Raw S3 URI: s3://{bucket_name}/{raw_s3_key}")
     print(f"Expected processed S3 URI: s3://{bucket_name}/{transformed_s3_key}")
     print("Lambda transform and RDS load continue inside AWS.")

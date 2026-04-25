@@ -55,8 +55,9 @@ resource "aws_s3_bucket_public_access_block" "xlsx_bucket" {
 }
 
 resource "random_password" "db_password" {
-  length  = 20
-  special = true
+  length           = 20
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
 data "aws_vpc" "default" {
