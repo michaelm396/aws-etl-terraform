@@ -138,7 +138,8 @@ Install these locally:
 If Homebrew is available:
 
 ```bash
-brew install terraform
+brew tap hashicorp/tap
+brew install hashicorp/tap/terraform
 brew install awscli
 ```
 
@@ -160,6 +161,10 @@ If `winget` is not available, install Terraform and AWS CLI from their official 
 Install Terraform from HashiCorp's official repository or package instructions.
 
 Install AWS CLI from the AWS official Linux installer.
+
+The deployment runner checks for Terraform and AWS CLI before provisioning.
+On macOS with Homebrew or Windows with `winget`, it asks before installing
+missing system tools. It does not silently change your machine.
 
 ## AWS Authentication
 
@@ -246,6 +251,15 @@ running the script with:
 ```bash
 python -m pip install -r requirements.txt
 ```
+
+The script also checks for Terraform and AWS CLI. If either is missing and a
+supported installer is available, it asks:
+
+```text
+Install missing system dependencies now? [y/N]
+```
+
+On macOS this uses Homebrew. On Windows this uses `winget`.
 
 No manual RDS credentials are required from the reviewer. Database authentication is handled inside AWS by the loader Lambda.
 

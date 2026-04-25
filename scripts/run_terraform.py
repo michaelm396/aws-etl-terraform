@@ -75,7 +75,8 @@ def print_system_install_instructions(missing_commands: list[str]) -> None:
         if shutil.which("brew"):
             print("\nmacOS with Homebrew:", file=sys.stderr)
             if "terraform" in missing_commands:
-                print("  brew install terraform", file=sys.stderr)
+                print("  brew tap hashicorp/tap", file=sys.stderr)
+                print("  brew install hashicorp/tap/terraform", file=sys.stderr)
             if "aws" in missing_commands:
                 print("  brew install awscli", file=sys.stderr)
         else:
@@ -108,6 +109,73 @@ def print_system_install_instructions(missing_commands: list[str]) -> None:
             "\nInstall Terraform and AWS CLI from their official installers.",
             file=sys.stderr,
         )
+
+
+def system_install_commands(missing_commands: list[str]) -> list[list[str]]:
+    """Return safe OS/package-manager install commands for missing tools."""
+    system_name = platform.system().lower()
+    commands: list[list[str]] = []
+
+    if system_name == "darwin" and shutil.which("brew"):
+        if "terraform" in missing_commands:
+            commands.append(["brew", "tap", "hashicorp/tap"])
+            commands.append(["brew", "install", "hashicorp/tap/terraform"])
+        if "aws" in missing_commands:
+            commands.append(["brew", "install", "awscli"])
+    elif system_name == "windows" and shutil.which("winget"):
+        if "terraform" in missing_commands:
+            commands.append(["winget", "install", "Hashicorp.Terraform"])
+        if "aws" in missing_commands:
+            commands.append(["winget", "install", "Amazon.AWSCLI"])
+
+    return commands
+
+
+def prompt_yes_no(question: str) -> bool:
+    """Return True when the user explicitly answers yes."""
+    try:
+        answer = input(question)
+    except EOFError:
+        answer = ""
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def offer_system_dependency_install(missing_commands: list[str]) -> None:
+    """Ask before installing supported missing system dependencies."""
+    install_commands = system_install_commands(missing_commands)
+    if not install_commands:
+        print_system_install_instructions(missing_commands)
+        sys.exit(1)
+
+    print(
+        "Missing required system command(s): "
+        f"{', '.join(missing_commands)}"
+    )
+    print("The deployment runner can install these with:")
+    for command in install_commands:
+        print(f"  {' '.join(command)}")
+
+    if not prompt_yes_no("Install missing system dependencies now? [y/N] "):
+        print_system_install_instructions(missing_commands)
+        sys.exit(1)
+
+    for command in install_commands:
+        run_command(command, cwd=PROJECT_ROOT)
+
+    still_missing = [
+        command for command in missing_commands if shutil.which(command) is None
+    ]
+    if still_missing:
+        print(
+            "Installation completed, but these commands are still not available "
+            f"on PATH: {', '.join(still_missing)}",
+            file=sys.stderr,
+        )
+        print(
+            "Open a new terminal or update your PATH, then rerun this script.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def parse_requirement_name(raw_line: str) -> str | None:
@@ -163,11 +231,7 @@ def ensure_python_dependencies() -> None:
         return
 
     print(f"Missing Python dependencies: {', '.join(missing)}")
-    try:
-        answer = input("Python dependencies are missing. Install them now? [y/N] ")
-    except EOFError:
-        answer = ""
-    if answer.strip().lower() in {"y", "yes"}:
+    if prompt_yes_no("Python dependencies are missing. Install them now? [y/N] "):
         install_python_dependencies(REQUIREMENTS_FILE)
         return
 
@@ -189,8 +253,7 @@ def ensure_prerequisites(var_file: Path) -> None:
         command for command in ("terraform", "aws") if shutil.which(command) is None
     ]
     if missing_commands:
-        print_system_install_instructions(missing_commands)
-        sys.exit(1)
+        offer_system_dependency_install(missing_commands)
 
     if not var_file.exists():
         print(f"Terraform variable file not found: {var_file}", file=sys.stderr)
