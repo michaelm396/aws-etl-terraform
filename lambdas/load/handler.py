@@ -141,24 +141,6 @@ def ensure_schema(connection: pg8000.dbapi.Connection) -> None:
         ADD COLUMN IF NOT EXISTS timezone TEXT
         """
     )
-    cursor.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_name = 'person_records'
-                  AND column_name = 'gender'
-            ) THEN
-                EXECUTE '
-                    UPDATE person_records
-                    SET gender_mapped = COALESCE(gender_mapped, gender)
-                ';
-            END IF;
-        END $$;
-        """
-    )
     # Keep the lookup table synchronized with the transform mapping.
     for code, label in GENDER_LOOKUP.items():
         cursor.execute(

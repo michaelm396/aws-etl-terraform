@@ -179,7 +179,7 @@ You can also use environment variables:
 ```bash
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
-export AWS_DEFAULT_REGION=us-west-1
+export AWS_DEFAULT_REGION=us-west-2
 ```
 
 Verify it:
@@ -213,11 +213,16 @@ If you attach policies as inline user policies and hit AWS's inline policy size 
 
 [`iam/terraform-user-apigateway-policy.json`](/Users/yljlyuad/Desktop/aws_etl_terraform/iam/terraform-user-apigateway-policy.json)
 
+For the EC2/Ollama chatbot, attach the EC2/security-group permissions separately from:
+
+[`iam/terraform-user-ec2-chatbot-policy.json`](/Users/yljlyuad/Desktop/aws_etl_terraform/iam/terraform-user-ec2-chatbot-policy.json)
+
 If you prefer AWS managed policies in your sandbox account, the broadest simple option is to give your Terraform user:
 
 - `AmazonS3FullAccess`
 - `AWSLambda_FullAccess`
 - `AmazonAPIGatewayAdministrator`
+- `AmazonEC2FullAccess`
 - `IAMFullAccess`
 - `AmazonRDSFullAccess`
 - `AmazonVPCFullAccess`
@@ -272,8 +277,18 @@ These are installed during deployment into the Lambda package, not into your loc
 - `pg8000` for the RDS loader Lambda
 
 The transform Lambda uses the AWS-managed pandas layer for Python 3.11 in
-`us-west-1`, so `pandas` is available at runtime without inflating the ZIP
+`us-west-2`, so `pandas` is available at runtime without inflating the ZIP
 package beyond Lambda's direct upload size limit.
+
+### Default AWS Region
+
+This project defaults to `us-west-2`. New AWS accounts commonly have EC2
+available in `us-west-2`, which makes the full deployment work out of the box
+for both the Lambda classifier API and the EC2/Ollama chatbot API.
+
+Changing AWS regions creates a separate Terraform stack with separate AWS
+resources. If you previously deployed this project in `us-west-1`, destroy the
+old `us-west-1` resources when you no longer need them.
 
 ## How To Run
 
@@ -300,7 +315,7 @@ That command will:
 6. Generate a fresh Terraform plan
 7. Run `terraform apply`
 8. Upload the provided `.xlsx` file to S3
-9. Print the final inference API URL and a ready-to-use GET request example
+9. Print the final classifier API URL, chatbot API URL, and ready-to-use curl examples
 
 The default command is `deploy`, so these are equivalent:
 
@@ -327,7 +342,7 @@ Postman, or any HTTP client can call the endpoint directly.
 GET endpoint URL format:
 
 ```text
-https://<api-id>.execute-api.us-west-1.amazonaws.com/dev/predict?domain_type={domain_type}&country={country}
+https://<api-id>.execute-api.us-west-2.amazonaws.com/dev/predict?domain_type={domain_type}&country={country}
 ```
 
 Required parameters:
@@ -345,7 +360,7 @@ Required parameters:
 Example request:
 
 ```bash
-curl "https://<api-id>.execute-api.us-west-1.amazonaws.com/dev/predict?domain_type=commercial&country=United%20States"
+curl "https://<api-id>.execute-api.us-west-2.amazonaws.com/dev/predict?domain_type=commercial&country=United%20States"
 ```
 
 Example response:
@@ -669,7 +684,7 @@ Expected response:
 The final inference API URL looks like:
 
 ```text
-https://<api-id>.execute-api.us-west-1.amazonaws.com/dev/predict
+https://<api-id>.execute-api.us-west-2.amazonaws.com/dev/predict
 ```
 
 Parts of the URL:
@@ -677,9 +692,239 @@ Parts of the URL:
 - `https://` is the secure protocol used by API Gateway.
 - `<api-id>` is the unique API Gateway identifier AWS creates for your HTTP API.
 - `execute-api` is the AWS-managed API Gateway domain.
-- `us-west-1` is the AWS region where the API is deployed.
+- `us-west-2` is the AWS region where the API is deployed.
 - `/dev` is the API stage name.
 - `/predict` is the route path mapped to the inference Lambda.
+
+## Model Serving Paths
+
+This project deploys two model-serving paths side-by-side by default:
+
+- **Serverless ML classifier on Lambda**
+  - Endpoint: API Gateway `GET /predict`
+  - Purpose: lightweight structured prediction from `domain_type` and `country`
+  - Terraform flag: `enable_classifier_api = true`
+- **EC2/Ollama chatbot**
+  - Endpoint: FastAPI `POST /chat`
+  - Purpose: natural-language Q&A over the transformed RDS dataset
+  - Terraform flag: `enable_llm_chatbot = true`
+
+The classifier is serverless and cost-efficient, so it remains independent from
+the chatbot. Enabling or disabling the EC2 chatbot does not affect the Lambda
+classifier API.
+
+The chatbot runs on EC2 because Ollama and LLM serving need a long-running
+runtime and more control over compute than a short Lambda request is designed
+to provide.
+
+The EC2/Ollama chatbot requires an AWS account that is verified for EC2
+launches. If AWS blocks EC2 with an account verification error, that is an AWS
+account status issue rather than a Terraform issue. Sign in as the AWS root
+account owner, verify billing/contact/payment information, and open an AWS
+Support account verification case.
+
+`enable_llm_chatbot = false` is available only as an emergency fallback when
+you intentionally want to deploy the non-EC2 parts of the system while EC2
+verification is being resolved.
+
+When both serving paths are enabled, deployment prints examples for both:
+
+The deployment runner also waits for the deployed endpoints to return JSON
+before printing the final summary. Use the exact `curl` commands printed by the
+script; they include the current API Gateway URL and current EC2 public DNS, so
+you do not need to set shell variables like `CHATBOT_URL`.
+
+```bash
+curl "$(terraform output -raw inference_api_url)?domain_type=commercial&country=United%20States"
+```
+
+```bash
+curl -X POST "$(terraform output -raw chatbot_api_url)" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How many records are business?"}'
+```
+
+## LLM Chatbot API
+
+The `llm` branch adds an EC2-hosted chatbot API after the RDS load step. It
+lets a client ask natural-language questions about the transformed
+`person_records` table using `curl`. It is enabled by default for the full
+deployment.
+
+The chatbot runs:
+
+- Ollama
+- `qwen2.5:0.5b`
+- FastAPI
+- controlled predefined SQL queries against RDS
+
+The first version does not let the LLM generate or execute arbitrary SQL.
+Python detects supported question intents, runs fixed SQL, and passes the query
+result to Ollama for a concise plain-English answer.
+
+### Model Choice
+
+The chatbot uses:
+
+```text
+qwen2.5:0.5b
+```
+
+This model was chosen because it is small, efficient, and suitable for
+summarizing structured query results on a modest EC2 instance.
+
+### Endpoints
+
+Health check:
+
+```text
+http://<ec2-public-dns>:8000/health
+```
+
+Chat endpoint:
+
+```text
+http://<ec2-public-dns>:8000/chat
+```
+
+Terraform outputs the exact URLs:
+
+```bash
+cd terraform
+terraform output -raw chatbot_health_url
+terraform output -raw chatbot_api_url
+```
+
+The easiest path is still the deployment runner:
+
+```bash
+python3 scripts/run_terraform.py deploy
+```
+
+At the end, it prints tested, ready-to-run `curl --max-time ...` commands and
+the verified JSON responses.
+
+### Example Request
+
+```bash
+curl -X POST "http://<ec2-public-dns>:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How many records are business?"}'
+```
+
+Example response:
+
+```json
+{
+  "question": "How many records are business?",
+  "answer": "There are 42 business records.",
+  "query_type": "count_by_affiliation_category",
+  "data": {
+    "affiliation_category": "business",
+    "record_count": 42
+  }
+}
+```
+
+### Supported Questions
+
+- `How many records are business?`
+- `How many records are commercial?`
+- `What are the top countries in the dataset?`
+- `How many records are from United States?`
+- `How many records are missing city or region?`
+- `Summarize the dataset.`
+
+Additional examples:
+
+```bash
+curl -X POST "http://<ec2-public-dns>:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What are the top countries in the dataset?"}'
+```
+
+```bash
+curl -X POST "http://<ec2-public-dns>:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Summarize the dataset."}'
+```
+
+### Chatbot Security Notes
+
+- RDS remains private.
+- EC2 connects to RDS through security-group access on the database port.
+- FastAPI port `8000` is open for demo by default through `chatbot_http_cidr`.
+- SSH is blocked by default through `chatbot_ssh_cidr = "0.0.0.0/32"` unless you configure a trusted CIDR and key pair.
+
+Optional Terraform variables:
+
+```hcl
+enable_classifier_api = true
+enable_llm_chatbot   = true
+chatbot_instance_type = "t2.micro"
+chatbot_http_cidr     = "203.0.113.10/32"
+chatbot_ssh_cidr      = "203.0.113.10/32"
+chatbot_key_name      = "my-key-pair"
+```
+
+If `enable_llm_chatbot = true` fails with an EC2 `UnsupportedOperation` or
+`account-verification` error, complete AWS account verification for EC2. This
+does not disable or destroy the classifier API. Set `enable_llm_chatbot = false`
+only as an emergency fallback if you want to deploy the ETL pipeline and
+classifier while EC2 verification is pending.
+
+The chatbot defaults to `t2.micro` because new AWS accounts may have a 1 vCPU
+EC2 quota. If you change `chatbot_instance_type` to a larger instance and see
+`VcpuLimitExceeded`, request an EC2 quota increase or switch back to `t2.micro`.
+
+### Local Chatbot Testing
+
+You can run the chatbot locally when Ollama is installed and you have network
+access to the RDS database.
+
+Pull the model:
+
+```bash
+ollama pull qwen2.5:0.5b
+```
+
+Start Ollama:
+
+```bash
+ollama serve
+```
+
+Set database environment variables:
+
+```bash
+export DB_HOST="<rds-endpoint>"
+export DB_PORT="5432"
+export DB_NAME="<database-name>"
+export DB_USER="<database-user>"
+export DB_PASSWORD="<database-password>"
+```
+
+Run FastAPI:
+
+```bash
+cd llm_chatbot
+python3 -m pip install -r requirements.txt
+python3 -m uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+Test health:
+
+```bash
+curl "http://localhost:8000/health"
+```
+
+Test chat:
+
+```bash
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How many records are business?"}'
+```
 
 ## How To Verify Execution
 
@@ -705,13 +950,13 @@ aws s3 ls s3://$(terraform output -raw bucket_name)/processed/
 ### 4. Check transform Lambda logs
 
 ```bash
-aws logs tail /aws/lambda/$(terraform output -raw lambda_function_name) --since 10m --region us-west-1
+aws logs tail /aws/lambda/$(terraform output -raw lambda_function_name) --since 10m --region us-west-2
 ```
 
 ### 5. Check loader Lambda logs
 
 ```bash
-aws logs tail /aws/lambda/$(terraform output -raw loader_lambda_function_name) --since 10m --region us-west-1
+aws logs tail /aws/lambda/$(terraform output -raw loader_lambda_function_name) --since 10m --region us-west-2
 ```
 
 You should see lines like:
@@ -733,9 +978,12 @@ You should also now see:
 To destroy the infrastructure:
 
 ```bash
-cd terraform
-terraform destroy -var-file=terraform.tfvars
+python3 scripts/run_terraform.py destroy
 ```
+
+The deployment runner empties versioned S3 objects and delete markers before
+running `terraform destroy`, which prevents `BucketNotEmpty` errors during
+cleanup.
 
 ## GitHub Handoff Checklist
 

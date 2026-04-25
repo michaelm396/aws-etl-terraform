@@ -1,7 +1,7 @@
 variable "aws_region" {
-  description = "AWS region for the S3 bucket."
+  description = "AWS region for the ETL pipeline, classifier API, and EC2/Ollama chatbot."
   type        = string
-  default     = "us-west-1"
+  default     = "us-west-2"
 }
 
 variable "project_name" {
@@ -48,6 +48,12 @@ variable "inference_lambda_function_name" {
   default     = "institution-type-inference"
 }
 
+variable "enable_classifier_api" {
+  description = "Whether to create the serverless Lambda/API Gateway classifier endpoint."
+  type        = bool
+  default     = true
+}
+
 variable "processed_prefix" {
   description = "S3 prefix used for transformed output files."
   type        = string
@@ -75,5 +81,35 @@ variable "db_username" {
 variable "transform_pandas_layer_arn" {
   description = "AWS-managed Lambda layer ARN that provides pandas for the transform Lambda."
   type        = string
-  default     = "arn:aws:lambda:us-west-1:336392948345:layer:AWSSDKPandas-Python311:28"
+  default     = "arn:aws:lambda:us-west-2:336392948345:layer:AWSSDKPandas-Python311:28"
+}
+
+variable "enable_llm_chatbot" {
+  description = "Whether to create the EC2-hosted Ollama/FastAPI chatbot. Set false only as an emergency fallback when AWS account EC2 verification is blocked."
+  type        = bool
+  default     = true
+}
+
+variable "chatbot_instance_type" {
+  description = "EC2 instance type for the Ollama/FastAPI chatbot API. Defaults to a 1-vCPU type for new-account EC2 quotas."
+  type        = string
+  default     = "t2.micro"
+}
+
+variable "chatbot_http_cidr" {
+  description = "CIDR allowed to reach the chatbot FastAPI demo port."
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
+variable "chatbot_ssh_cidr" {
+  description = "CIDR allowed to SSH into the chatbot instance. Default blocks SSH."
+  type        = string
+  default     = "0.0.0.0/32"
+}
+
+variable "chatbot_key_name" {
+  description = "Optional EC2 key pair name for SSH access to the chatbot instance."
+  type        = string
+  default     = null
 }
